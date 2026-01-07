@@ -21,4 +21,3 @@ git clone [https://github.com/your-username/health-system-tool.git](https://gith
 cd health-system-tool
 sudo make install
 ```
-### Usage
