@@ -1,206 +1,100 @@
 #!/bin/bash
+export LC_ALL=C 
 
-
-#clean
-clear
-# --- CONFIGURATION & COLORS ---
-USER=$(whoami)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NO_COLOR='\033[0m'
 
-# LOGGING
-LOG_FILE="/var/log/system_crisis.log"
-LOCAL_LOG="./system_crisis.log"
 
-# --- INITIAL STATES --
-INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-PREV_NET_STATE=$(cat /sys/class/net/$INTERFACE/operstate 2>/dev/null || echo "down")
-PREV_SSH_COUNT=$(ss -tun | grep -c ":22")
-PREV_RAM_STATE="OK"
-CORES=$(nproc)
+LOG_DIR="/var/log"
+LOG_FILE="$LOG_DIR/system_crisis.log"
 
-# --- CURSOR CONTROL ---
-# Hide cursor for a professional look
-printf "\033[?25l"
-
-# --- HELP MENU ---
-if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
-    printf "\033[?25h" # Show cursor before exiting
-    echo -e "${YELLOW}Health System Tool v1.1${NO_COLOR}"
-    echo "Usage: ./health-check.sh"
-    echo ""
-    echo "Description: Real-time monitor for CPU, RAM, Disk, and Network."
-    exit 0
-fi
-
-# --- DEPENDENCY CHECK ---
-for cmd in curl awk ss ps free df hostname bc top; do
-    if ! command -v $cmd &> /dev/null; then
-        printf "\033[?25h"
-        echo -e "${RED}Error: Required command '$cmd' is not installed.${NO_COLOR}"
-        exit 1
-    fi
-done
-
-# --- CLEAN EXIT ---
-clean_exit(){
-    # Show cursor again when stopping
-    printf "\033[?25h"
-    clear
-    echo -e "${NO_COLOR}\n[!] Monitor stopped by user. Cleaning up..."
-    exit 0
-}
-trap clean_exit SIGINT SIGTERM
+CORES=$(nproc 2>/dev/null || echo 1)
+printf "\033[?25l" 
 
 log_event(){
     local message=$1
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] EVENT: $message" >> "$LOG_FILE" 2>/dev/null || \
-    echo "[$timestamp] EVENT: $message" >> "$LOCAL_LOG"
+    echo "[$timestamp] ALERT: $message" >> "$LOG_FILE" 2>/dev/null || \
+    echo "[$timestamp] ALERT: $message" >> "./system_crisis.log" 2>/dev/null
 }
 
-# --- INITIAL DATA ---
-PUBLIC_IP=$(curl -s --max-time 2 ifconfig.me)
-[ -z "$PUBLIC_IP" ] && PUBLIC_IP="Unknown net"
+clean_exit(){
+    printf "\033[?25h" 
+    reset
+    exit 0
+}
+trap clean_exit SIGINT SIGTERM
 
 draw_bar(){
-    local percentage=$1
+    local percentage=${1:-0}
+    percentage=$(printf "%.0f" "$percentage" 2>/dev/null || echo 0)
+    [ "$percentage" -gt 100 ] && percentage=100
     local width=20
-    # Cap percentage at 100 for visual bar
-    local display_perc=$percentage
-    [ $display_perc -gt 100 ] && display_perc=100
-    
-    local filled=$((display_perc * width / 100))
+    local filled=$((percentage * width / 100))
     local empty=$((width - filled))
     local COLOR=$GREEN
-    [ $percentage -ge 70 ] && COLOR=$YELLOW
-    [ $percentage -ge 90 ] && COLOR=$RED
-
-    printf "["
-    printf "${COLOR}"
-    printf "%${filled}s" | tr ' ' '#'
-    printf "${NO_COLOR}"
-    printf "%${empty}s" | tr ' ' '-'
-    printf "] %d%%" "$percentage"
+    [ "$percentage" -ge 70 ] && COLOR=$YELLOW
+    [ "$percentage" -ge 90 ] && COLOR=$RED
+    
+    local bar="["
+    bar+="${COLOR}"
+    for ((i=0; i<filled; i++)); do bar+="#"; done
+    bar+="${NO_COLOR}"
+    for ((i=0; i<empty; i++)); do bar+="-"; done
+    bar+="] ${percentage}%"
+    
+    echo -e "$bar"
 }
 
+PUBLIC_IP=$(curl -s --max-time 2 ifconfig.me || echo "N/A")
+
 while true; do
-    # Use ANSI code to move cursor to top-left (no flicker)
-    printf "\033[H"
-
-    # --- DATA GATHERING ---
-    DATE=$(date +%D" "%H:%M:%S)
-    UPTIME_SYSTEM=$(uptime -p)
-    ACTIVE_SESSION_COUNT=$(who | wc -l)
-
-    # CPU & Load Analytics
-    LOAD_CPU=$(cat /proc/loadavg | awk '{print $1, $2, $3}')
-    LOAD_1M=$(echo $LOAD_CPU | awk '{print $1}')
-    # Saturation: (Load / Cores) * 100
-    CPU_SAT=$(echo "scale=0; ($LOAD_1M * 100) / $CORES" | bc 2>/dev/null)
-    # I/O Wait (Disk Latency)
-    IO_WAIT=$(top -bn1 | grep "Cpu(s)" | awk '{print $10}' | tr ',' '.')
-
-    # File Descriptors
-    FILE_INFO=$(cat /proc/sys/fs/file-nr)
-    FILES_OPEN=$(echo $FILE_INFO | awk '{print $1}')
-    FILES_MAX=$(echo $FILE_INFO | awk '{print $3}')
-    FILES_PERC=$(( FILES_OPEN * 100 / FILES_MAX ))
-
-    # Processes
-    TOTAL_PROC=$(ps aux | wc -l | awk '{print $1 - 1}')
-    ZOMBIES=$(ps aux | awk '$8=="Z"' | wc -l)
-    STOPPED_PROC=$(ps axo state | grep -c "T")
-    SLEEP_PROC=$(ps axo state | grep -c "S")
-
-    # RAM & Disk
-    TOTAL_RAM=$(free -m | grep Mem | awk '{print $2}')
-    USED_RAM=$(free -m | grep Mem | awk '{print $3}')
-    PERCENTAGE_RAM=$((USED_RAM*100/TOTAL_RAM))
-    DISK_USAGE=$(df / --output=pcent | grep -oP '\d+' | head -n1)
-
-    # Network & Security
-    NET_STATE=$(cat /sys/class/net/$INTERFACE/operstate 2>/dev/null || echo "down")
-    CONN_COUNT=$(ss -tun | grep -c "ESTAB")
-    LOCAL_IP=$(hostname -I | awk '{print $1}')
-    OPEN_PORTS=$(ss -tuln | grep LISTEN | awk '{print $5}' | cut -d':' -f2 | sort -u | tr '\n' ' ')
-    SSH_SESSIONS=$(ss -tun | grep -c ":22")
-
-    # --- DASHBOARD OUTPUT ---
-    echo -e "${YELLOW}==========================================================${NO_COLOR}"
-    echo -e " PRO SYS-ADMIN MONITOR - $DATE"
-    echo -e "${YELLOW}==========================================================${NO_COLOR}"
-    echo -e "User: $USER | Host: $(hostname) | Cores: $CORES"
-    echo -e "Uptime: $UPTIME_SYSTEM"
-    echo -e "CPU Load: $LOAD_CPU"
-    echo -e "CPU Saturation: $(draw_bar $CPU_SAT) | I/O Wait: ${RED}${IO_WAIT}%${NO_COLOR}"
-    echo -e "File Handlers:  $(draw_bar $FILES_PERC) ($FILES_OPEN/$FILES_MAX)"
-    echo -e "Total Proc: $TOTAL_PROC | Zombies: $ZOMBIES | Stopped: $STOPPED_PROC  | Sleeping: $SLEEP_PROC"
-    echo "----------------------------------------------------------"
-    echo "Local IP: $LOCAL_IP  |  Public IP: $PUBLIC_IP"
-    echo "Net: $NET_STATE ($INTERFACE) | Connections: $CONN_COUNT"
-    echo -e "Listening Ports: ${GREEN}$OPEN_PORTS${NO_COLOR}"
-
-    if [ "$SSH_SESSIONS" -gt 0 ]; then
-        echo -e "${RED}SECURITY ALERT: $SSH_SESSIONS active SSH session(s)!${NO_COLOR}"
-    else
-        echo -e "${GREEN}SSH Security: No external connections detected${NO_COLOR}"
-    fi
-
-    echo "----------------------------------------------------------"
+    RAM_P=$(free -m 2>/dev/null | awk '/Mem:/ {if($2>0) printf "%.0f", ($3/$2)*100; else print 0}')
+    LOAD_AVG=$(cat /proc/loadavg 2>/dev/null | awk '{print $1}')
+    CPU_S=$(awk -v c="$CORES" -v l="$LOAD_AVG" 'BEGIN {printf "%.0f", (l*100)/c}')
+    IO_W=$(top -bn1 2>/dev/null | grep -i "cpu" | sed 's/,/ /g' | awk '{for(i=1;i<=NF;i++) if($i ~ /wa/ || $i ~ /iow/) {print $(i-1); exit}}' | tr -d 'a-zA-Z% ')
+    [ -z "$IO_W" ] && IO_W=0
+    DISK_P=$(df / 2>/dev/null | awk 'NR>1 {for(i=1;i<=NF;i++) if($i ~ /%/) {print $i; exit}}' | tr -d '%')
+    PROCESS_LIST=$(ps -axco state 2>/dev/null || ps -o state 2>/dev/null || ps ax -o state 2>/dev/null)
     
-    # RAM Monitor
-    if [ $PERCENTAGE_RAM -ge 90 ]; then
-        echo -e "${RED}RAM ALERT:${NO_COLOR} $(draw_bar $PERCENTAGE_RAM)"
-        printf "${YELLOW}%-10s %-8s %-7s %-20s${NO_COLOR}\n" "USER" "PID" "%MEM" "COMMAND"
-        ps aux --sort=-%mem | head -n4 | awk 'NR >1 {printf "%-10s %-8s %-7s %-20s\n" , $1, $2 , $4"%", substr($11,1,30)}'
+    TOTAL_PROC=$(echo "$PROCESS_LIST" | wc -l)
+    RUNNING_PROC=$(echo "$PROCESS_LIST" | grep -c "R")
+    SLEEPING_PROC=$(echo "$PROCESS_LIST" | grep -c "S")
+    STOPPED_PROC=$(echo "$PROCESS_LIST" | grep -E -c "T|D") 
+    ZOMBIES_PROC=$(echo "$PROCESS_LIST" | grep -c "Z")
+
+    LOCAL_IP=$(ip -4 addr show scope global | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
+    [ -z "$LOCAL_IP" ] && LOCAL_IP="127.0.0.1"
+
+    if command -v ss >/dev/null 2>&1; then
+        SSH_S=$(ss -tun | grep -c ":22")
+    elif command -v netstat >/dev/null 2>&1; then
+        SSH_S=$(netstat -tun | grep -c ":22")
     else
-        echo -e "${GREEN}RAM OK:   ${NO_COLOR} $(draw_bar $PERCENTAGE_RAM)"
+        SSH_S=0
     fi
+    SSH_S=${SSH_S:-0}
 
-    # Disk Monitor
-    if [ $DISK_USAGE -ge 80 ]; then
-        echo -e "${RED}DISK ALERT:${NO_COLOR} $(draw_bar $DISK_USAGE)"
-    else
-        echo -e "${GREEN}DISK OK:   ${NO_COLOR} $(draw_bar $DISK_USAGE)"
-    fi
-    echo -e "${YELLOW}==========================================================${NO_COLOR}"
+    DASH="${YELLOW}==========================================================${NO_COLOR}\n"
+    DASH+=" GENERAL MONITOR - $(date "+%Y-%m-%d %H:%M:%S")\n"
+    DASH+="${YELLOW}==========================================================${NO_COLOR}\n"
+    DASH+="Host: $(hostname) | Cores: $CORES | Uptime: $(uptime 2>/dev/null | sed 's/.*up \([^,]*\), .*/\1/')\n"
+    DASH+="CPU Saturation: $(draw_bar "$CPU_S") | I/O Wait: ${RED}${IO_W}%${NO_COLOR}\n"
+    DASH+="RAM Usage:      $(draw_bar "$RAM_P")\n"
+    DASH+="Disk Usage:     $(draw_bar "$DISK_P")\n"
+    DASH+="----------------------------------------------------------\n"
+    DASH+=" Processes: $TOTAL_PROC | Running: ${GREEN}$RUNNING_PROC${NO_COLOR} | Sleeping: $SLEEPING_PROC\n"
+    DASH+=" Stopped: ${YELLOW}$STOPPED_PROC${NO_COLOR}   | Zombies: ${RED}$ZOMBIES_PROC${NO_COLOR}\n"
+    DASH+="----------------------------------------------------------\n"
+    DASH+=" Local IP: $LOCAL_IP | Public IP: $PUBLIC_IP\n"
+    DASH+=" SSH Sessions: $SSH_S\n"
+    DASH+="${YELLOW}==========================================================${NO_COLOR}"
+    printf "\033[H\033[J%b\n" "$DASH"
 
-    # --- LOGGING LOGIC ---
-    # Crisis Snapshot
-    if [ $PERCENTAGE_RAM -ge 90 ] || [ $CPU_SAT -ge 100 ]; then
-        {
-            echo "=== CRISIS SNAPSHOT: $DATE ==="
-            echo "RAM: ${PERCENTAGE_RAM}% | Saturation: ${CPU_SAT}% | I/O Wait: ${IO_WAIT}%"
-            ps aux --sort=-%mem | head -n 6
-            echo "-------------------------------------------"
-        } >> "$LOG_FILE" 2>/dev/null || {
-            echo "=== CRISIS SNAPSHOT: $DATE ===" >> "$LOCAL_LOG"
-            ps aux --sort=-%mem | head -n 6 >> "$LOCAL_LOG"
-        }
-    fi
-
-    # Network Events
-    if [ "$NET_STATE" != "$PREV_NET_STATE" ]; then
-        log_event "Network interface $INTERFACE changed from '$PREV_NET_STATE' to '$NET_STATE'"
-        PREV_NET_STATE=$NET_STATE
-    fi
-
-    # Security Events
-    if [ "$SSH_SESSIONS" -ne "$PREV_SSH_COUNT" ]; then
-        log_event "SSH sessions changed: $PREV_SSH_COUNT -> $SSH_SESSIONS"
-        PREV_SSH_COUNT=$SSH_SESSIONS
-    fi
-
-    # RAM State Transitions
-    CURRENT_RAM_STATE="OK"
-    [ $PERCENTAGE_RAM -ge 90 ] && CURRENT_RAM_STATE="CRITICAL"
-    if [ "$CURRENT_RAM_STATE" != "$PREV_RAM_STATE" ]; then
-        log_event "System Health: RAM moved to $CURRENT_RAM_STATE state ($PERCENTAGE_RAM%)"
-        PREV_RAM_STATE=$CURRENT_RAM_STATE
-    fi
-
+    [ "$CPU_S" -ge 90 ] && log_event "Critical CPU Load: $CPU_S%"
+    [ "$RAM_P" -ge 90 ] && log_event "Critical RAM Usage: $RAM_P%"
+    [ "$ZOMBIES_PROC" -gt 0 ] && log_event "Zombie processes detected: $ZOMBIES_PROC"
     sleep 2
 done
